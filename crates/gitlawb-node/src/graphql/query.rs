@@ -321,8 +321,15 @@ mod tests {
         let db = db(pool).await;
         let owner1 = "did:key:z6MkaOwner1";
         let owner2 = "did:key:z6MkbOwner2";
-        // Seed owner2 repos with a name ("a-repo") that sorts before owner1's cursor name ("z-repo")
-        // to ensure (owner_did, name) tuple ordering is required across page boundaries.
+        let earlier_owner = "did:web:example.com";
+        // This owner sorts first only after did:key normalization. Its name
+        // sorts past the first cursor, so an unqualified OR name predicate
+        // would incorrectly serve it again on the next page.
+        db.create_repo(&repo("r0", earlier_owner, "zz-repo", true))
+            .await
+            .unwrap();
+        // Owner2's a-repo sorts before owner1's names, requiring the normalized
+        // (owner, name) tuple both within pages and across page boundaries.
         db.create_repo(&repo("r1", owner1, "b-repo", true))
             .await
             .unwrap();
@@ -348,8 +355,8 @@ mod tests {
         assert_eq!(
             p1["nodes"],
             serde_json::json!([
+                {"name": "zz-repo", "ownerDid": earlier_owner},
                 {"name": "b-repo", "ownerDid": owner1},
-                {"name": "z-repo", "ownerDid": owner1},
             ])
         );
         let cursor = p1["endCursor"].as_str().unwrap();
@@ -360,13 +367,25 @@ mod tests {
         let page2_resp = anon(&schema, &page2_query).await;
         assert!(page2_resp.errors.is_empty(), "{:?}", page2_resp.errors);
         let p2 = page2_resp.data.into_json().unwrap()["reposPage"].clone();
-        assert_eq!(p2["hasNextPage"], false);
+        assert_eq!(p2["hasNextPage"], true);
         assert_eq!(
             p2["nodes"],
             serde_json::json!([
+                {"name": "z-repo", "ownerDid": owner1},
                 {"name": "a-repo", "ownerDid": owner2},
-                {"name": "c-repo", "ownerDid": owner2},
             ])
+        );
+        let cursor = p2["endCursor"].as_str().unwrap();
+        let page3_query = format!(
+            "{{ reposPage(limit: 2, after: \"{cursor}\") {{ nodes {{ name ownerDid }} hasNextPage endCursor }} }}"
+        );
+        let page3_resp = anon(&schema, &page3_query).await;
+        assert!(page3_resp.errors.is_empty(), "{:?}", page3_resp.errors);
+        let p3 = page3_resp.data.into_json().unwrap()["reposPage"].clone();
+        assert_eq!(p3["hasNextPage"], false);
+        assert_eq!(
+            p3["nodes"],
+            serde_json::json!([{"name": "c-repo", "ownerDid": owner2}])
         );
     }
 
