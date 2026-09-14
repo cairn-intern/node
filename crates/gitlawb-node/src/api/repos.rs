@@ -7124,6 +7124,7 @@ mod tests {
     /// A pkt-line receive-pack body carrying one branch-create ref update, so the
     /// handler's post-receive tail resolves a non-empty new-tip set (the delta
     /// scan's git stages run).
+    #[cfg(unix)]
     fn ref_update_body(new_sha: &str) -> axum::body::Bytes {
         let line = format!("{ZERO_SHA} {new_sha} refs/heads/main");
         axum::body::Bytes::from(format!("{:04x}{}0000", line.len() + 4, line))
@@ -9581,6 +9582,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     fn f2a_log(log: &std::path::Path) -> String {
         std::fs::read_to_string(log).unwrap_or_default()
     }
@@ -9588,6 +9590,7 @@ mod tests {
     /// Withheld-walk children run so far. `ls-tree` is the walk's signature child
     /// (`blob_paths` lists every reachable commit's tree); the delta scan and the
     /// full-scan fallback use `rev-list` / `cat-file` instead.
+    #[cfg(unix)]
     fn f2a_walks(log: &std::path::Path) -> usize {
         f2a_log(log)
             .lines()
@@ -9599,6 +9602,7 @@ mod tests {
     /// the withheld walk actually runs rather than taking the no-rule shortcut).
     /// The repo's on-disk path is passed to the tail directly, so no repo_store or
     /// receive-pack plumbing is involved.
+    #[cfg(unix)]
     async fn f2a_state(
         pool: sqlx::PgPool,
         git_bin: &str,
@@ -9630,6 +9634,7 @@ mod tests {
         (state, rec)
     }
 
+    #[cfg(unix)]
     fn f2a_update(ref_name: &str, new_sha: &str) -> Vec<RefUpdate> {
         vec![RefUpdate {
             old_sha: ZERO_SHA.to_string(),
@@ -9638,6 +9643,7 @@ mod tests {
         }]
     }
 
+    #[cfg(unix)]
     const F2A_PUSHER: &str = "did:key:z6MkF2aPusherAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     /// Scenario 1 (the finding). A second rapid push to the same repo coalesces
@@ -9711,6 +9717,7 @@ mod tests {
     }
     /// Poll `cond` until it holds, with a bound so a regression fails the test
     /// rather than hanging the suite.
+    #[cfg(unix)]
     async fn f2a_wait_for(mut cond: impl FnMut() -> bool, what: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !cond() {
@@ -9725,6 +9732,7 @@ mod tests {
     /// A `rev-list --objects` line names the tips a DELTA scan was asked to resolve,
     /// so it attributes that scan to one push's tips. The withheld walk's own
     /// `rev-list --all` / `ls-tree` lines never carry a tip as an argument this way.
+    #[cfg(unix)]
     fn f2a_delta_scanned(log: &std::path::Path, tip: &str) -> bool {
         f2a_log(log)
             .lines()
@@ -9871,6 +9879,7 @@ mod tests {
 
     /// Mount a Pinata upload endpoint that assigns every object the same CID, and
     /// point the state at it. Returns the server (kept alive by the caller) and CID.
+    #[cfg(unix)]
     async fn f2a_pinata(state: &mut AppState) -> (mockito::ServerGuard, String) {
         let cid = "bafyf2acoalescedmapping".to_string();
         let mut server = mockito::Server::new_async().await;
@@ -9890,6 +9899,7 @@ mod tests {
 
     /// Poll the branch to CID table until the push's mapping lands (the Pinata
     /// worker is detached), bounded so a regression fails rather than hangs.
+    #[cfg(unix)]
     async fn f2a_wait_for_branch_cid(
         db: &crate::db::Db,
         slug: &str,
@@ -9909,6 +9919,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn f2a_slug(rec: &crate::db::RepoRecord) -> String {
         format!(
             "{}/{}",
@@ -10042,6 +10053,7 @@ mod tests {
     // and `z6p2fail`), and owner-only push is on by default, so the identity has to
     // follow the repo each push targets rather than being fixed for both.
 
+    #[cfg(unix)]
     fn p2_push(
         state: &AppState,
         owner: &str,
@@ -10060,6 +10072,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     fn p2_logged(log: &std::path::Path, prefix: &str) -> bool {
         f2a_log(log).lines().any(|l| l.starts_with(prefix))
     }
@@ -10359,6 +10372,7 @@ mod tests {
     /// runs exactly one `rev-list --all`, so this counts the walks that were attempted
     /// (the `ls-tree` counter above cannot: a walk whose enumeration fails never gets
     /// to `ls-tree`).
+    #[cfg(unix)]
     fn f2b_walk_attempts(log: &std::path::Path) -> usize {
         f2a_log(log)
             .lines()
