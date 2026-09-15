@@ -691,22 +691,15 @@ async fn existing_promisor_state(repo: &str) -> PromisorProbe {
     }
 }
 
-// Git for Windows parses blob limits as a 32-bit unsigned long. Larger
-// Windows blobs remain available through promisor on-demand fetching.
-#[cfg(windows)]
-const PROMISOR_BLOB_FILTER: &str = "blob:limit=4294967295";
-#[cfg(not(windows))]
-const PROMISOR_BLOB_FILTER: &str = "blob:limit=10g";
-
-/// Mirror-clone a repo, marking filtered mirrors as promisors so packs that
-/// omit withheld blobs are accepted. The filter threshold is 10 GiB on Unix
-/// and 4 GiB minus one byte on Windows; larger blobs are fetched on demand.
+/// Mirror-clone a repo from a remote URL into a local bare repo.
+/// `Promisor` mode adds `--filter=blob:limit=10g`, which marks the repo a git
+/// promisor (so a pack with origin-omitted withheld blobs is accepted) while
+/// the huge size limit means every blob the origin *does* send is kept.
 async fn clone_repo(remote_url: &str, local_path: &Path, mode: MirrorMode) -> anyhow::Result<()> {
     let local_str = local_path.to_str().unwrap_or(".");
-    let filter_arg = format!("--filter={PROMISOR_BLOB_FILTER}");
     let mut args = vec!["clone", "--mirror"];
     if mode == MirrorMode::Promisor {
-        args.push(&filter_arg);
+        args.push("--filter=blob:limit=10g");
     }
     args.push(remote_url);
     args.push(local_str);
@@ -746,7 +739,7 @@ async fn fetch_repo(local_path: &Path, remote_url: &str, mode: MirrorMode) -> an
                 local_str,
                 "config",
                 "remote.origin.partialclonefilter",
-                PROMISOR_BLOB_FILTER,
+                "blob:limit=10g",
             ])
             .await?;
             git_run(&["-C", local_str, "fetch", "--prune", "origin"]).await
