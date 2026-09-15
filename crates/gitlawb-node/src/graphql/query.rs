@@ -325,21 +325,28 @@ mod tests {
         // This owner sorts first only after did:key normalization. Its name
         // sorts past the first cursor, so an unqualified OR name predicate
         // would incorrectly serve it again on the next page.
-        db.create_repo(&repo("r0", earlier_owner, "zz-repo", true))
+        //
+        // Rows are inserted out of order and assigned IDs that invert name order
+        // within each owner, so neither insertion order / created_at nor d.id can
+        // satisfy the asserted (owner, name) ordering. Sized to 6 entries so the
+        // last page is full-sized (limit 2), proving hasNextPage distinguishes a
+        // full terminal page from a page with remaining rows.
+        db.create_repo(&repo("r1", owner2, "d-repo", true))
             .await
             .unwrap();
-        // Owner2's a-repo sorts before owner1's names, requiring the normalized
-        // (owner, name) tuple both within pages and across page boundaries.
-        db.create_repo(&repo("r1", owner1, "b-repo", true))
+        db.create_repo(&repo("r6", owner2, "c-repo", true))
+            .await
+            .unwrap();
+        db.create_repo(&repo("r7", owner2, "a-repo", true))
             .await
             .unwrap();
         db.create_repo(&repo("r2", owner1, "z-repo", true))
             .await
             .unwrap();
-        db.create_repo(&repo("r3", owner2, "a-repo", true))
+        db.create_repo(&repo("r8", owner1, "b-repo", true))
             .await
             .unwrap();
-        db.create_repo(&repo("r4", owner2, "c-repo", true))
+        db.create_repo(&repo("r9", earlier_owner, "zz-repo", true))
             .await
             .unwrap();
 
@@ -385,7 +392,10 @@ mod tests {
         assert_eq!(p3["hasNextPage"], false);
         assert_eq!(
             p3["nodes"],
-            serde_json::json!([{"name": "c-repo", "ownerDid": owner2}])
+            serde_json::json!([
+                {"name": "c-repo", "ownerDid": owner2},
+                {"name": "d-repo", "ownerDid": owner2},
+            ])
         );
     }
 
