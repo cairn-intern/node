@@ -326,27 +326,28 @@ mod tests {
         // sorts past the first cursor, so an unqualified OR name predicate
         // would incorrectly serve it again on the next page.
         //
-        // Rows are inserted out of order and assigned IDs that invert name order
-        // within each owner, so neither insertion order / created_at nor d.id can
-        // satisfy the asserted (owner, name) ordering. Sized to 6 entries so the
-        // last page is full-sized (limit 2), proving hasNextPage distinguishes a
-        // full terminal page from a page with remaining rows.
-        db.create_repo(&repo("r1", owner2, "d-repo", true))
-            .await
-            .unwrap();
-        db.create_repo(&repo("r6", owner2, "c-repo", true))
-            .await
-            .unwrap();
-        db.create_repo(&repo("r7", owner2, "a-repo", true))
-            .await
-            .unwrap();
-        db.create_repo(&repo("r2", owner1, "z-repo", true))
-            .await
-            .unwrap();
-        db.create_repo(&repo("r8", owner1, "b-repo", true))
+        // Rows are inserted out of order and not in reverse asserted order.
+        // Assigned IDs do not track name order, and owner2 contains both
+        // "B-repo" and "a-repo" whose byte order (B < a) differs from their
+        // case-folded order (a < b), ensuring lower(d.name) cannot satisfy
+        // the keyset query. Sized to 6 entries so the last page is full-sized
+        // (limit 2), proving hasNextPage distinguishes a full terminal page.
+        db.create_repo(&repo("r5", owner2, "c-repo", true))
             .await
             .unwrap();
         db.create_repo(&repo("r9", earlier_owner, "zz-repo", true))
+            .await
+            .unwrap();
+        db.create_repo(&repo("r3", owner2, "B-repo", true))
+            .await
+            .unwrap();
+        db.create_repo(&repo("r8", owner1, "z-repo", true))
+            .await
+            .unwrap();
+        db.create_repo(&repo("r2", owner1, "b-repo", true))
+            .await
+            .unwrap();
+        db.create_repo(&repo("r1", owner2, "a-repo", true))
             .await
             .unwrap();
 
@@ -379,7 +380,7 @@ mod tests {
             p2["nodes"],
             serde_json::json!([
                 {"name": "z-repo", "ownerDid": owner1},
-                {"name": "a-repo", "ownerDid": owner2},
+                {"name": "B-repo", "ownerDid": owner2},
             ])
         );
         let cursor = p2["endCursor"].as_str().unwrap();
@@ -393,10 +394,43 @@ mod tests {
         assert_eq!(
             p3["nodes"],
             serde_json::json!([
+                {"name": "a-repo", "ownerDid": owner2},
                 {"name": "c-repo", "ownerDid": owner2},
-                {"name": "d-repo", "ownerDid": owner2},
             ])
         );
+    }
+
+    #[sqlx::test]
+    async fn repos_page_at_documented_maximum_distinguishes_terminal_page(pool: PgPool) {
+        let db = db(pool).await;
+        let total = crate::db::MAX_VISIBLE_REPO_PAGE_SIZE;
+        for index in 0..total {
+            let name = format!("repo-{index:03}");
+            db.create_repo(&repo(&name, OWNER, &name, true))
+                .await
+                .unwrap();
+        }
+        let schema = schema(db.clone());
+        let query =
+            format!("{{ reposPage(limit: {total}) {{ nodes {{ name }} hasNextPage endCursor }} }}");
+        let resp200 = anon(&schema, &query).await;
+        assert!(resp200.errors.is_empty(), "{:?}", resp200.errors);
+        let p200 = resp200.data.into_json().unwrap()["reposPage"].clone();
+        assert_eq!(p200["hasNextPage"], false);
+        let nodes200 = p200["nodes"].as_array().unwrap().clone();
+        assert_eq!(nodes200.len(), total);
+
+        // Adding row 201 keeps page 1 content identical while flipping hasNextPage to true.
+        let name201 = format!("repo-{total:03}");
+        db.create_repo(&repo(&name201, OWNER, &name201, true))
+            .await
+            .unwrap();
+        let resp201 = anon(&schema, &query).await;
+        assert!(resp201.errors.is_empty(), "{:?}", resp201.errors);
+        let p201 = resp201.data.into_json().unwrap()["reposPage"].clone();
+        assert_eq!(p201["hasNextPage"], true);
+        assert_eq!(p201["nodes"], p200["nodes"]);
+        assert_eq!(p201["endCursor"], p200["endCursor"]);
     }
 
     #[sqlx::test]
