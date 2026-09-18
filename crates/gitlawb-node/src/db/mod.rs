@@ -1576,8 +1576,8 @@ impl Db {
                         )
                     ELSE FALSE END
              )
-             AND ($4::text IS NULL OR (({key}), d.name) > ($4, $5::text))
-             ORDER BY ({key}), d.name
+             AND ($4::text IS NULL OR (({key}) COLLATE \"C\", d.name COLLATE \"C\") > ($4, $5::text))
+             ORDER BY ({key}) COLLATE \"C\", d.name COLLATE \"C\"
              LIMIT $6",
             Self::dedup_cte(),
             key = OWNER_KEY_CASE_SQL,
