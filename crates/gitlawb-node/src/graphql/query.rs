@@ -32,8 +32,14 @@ fn parse_repo_cursor(cursor: &str) -> Result<(String, String)> {
     let bytes = URL_SAFE_NO_PAD
         .decode(cursor)
         .map_err(|_| async_graphql::Error::new("invalid repository cursor"))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|_| async_graphql::Error::new("invalid repository cursor"))
+    let position: (String, String) = serde_json::from_slice(&bytes)
+        .map_err(|_| async_graphql::Error::new("invalid repository cursor"))?;
+    // PostgreSQL text cannot contain NUL. Reject it as malformed input before
+    // binding either cursor component, rather than reporting a database error.
+    if position.0.contains('\0') || position.1.contains('\0') {
+        return Err(async_graphql::Error::new("invalid repository cursor"));
+    }
+    Ok(position)
 }
 
 pub struct QueryRoot;
@@ -640,6 +646,31 @@ mod tests {
             serde_json::json!({
                 "nodes": [], "hasNextPage": false, "endCursor": null
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn repos_page_rejects_nul_cursors_before_database_access() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let schema = schema(Arc::new(Db::for_testing(pool)));
+        for position in [("did:key:zOwner\0", "repo"), ("did:key:zOwner", "repo\0")] {
+            let cursor = super::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&position).unwrap());
+            let query = format!("{{ reposPage(after: \"{cursor}\") {{ hasNextPage }} }}");
+            let response =
+                tokio::time::timeout(std::time::Duration::from_secs(1), anon(&schema, &query))
+                    .await
+                    .expect("invalid cursors must be rejected without accessing the database");
+            assert_eq!(response.errors.len(), 1);
+            assert_eq!(response.errors[0].message, "invalid repository cursor");
+            assert_eq!(response.data, async_graphql::Value::Null);
+        }
+        let position = ("did:key:zOwner", "repo");
+        let cursor = super::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&position).unwrap());
+        assert_eq!(
+            super::parse_repo_cursor(&cursor).unwrap(),
+            (position.0.to_owned(), position.1.to_owned())
         );
     }
 

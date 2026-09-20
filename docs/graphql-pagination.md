@@ -24,6 +24,8 @@ Start with `after: null`. When `hasNextPage` is true, pass the returned
 An empty page has a null `endCursor`. The default limit is 50; limits outside
 1–200 are rejected. The document complexity budget still applies, so requesting
 many fields may require a smaller page.
+Malformed cursors, including decoded owner or name strings containing NUL,
+return `invalid repository cursor` before database access.
 
 Pages are ordered by normalized owner DID and repository name. Visibility and
 mirror deduplication are applied in the database before limiting the page;
