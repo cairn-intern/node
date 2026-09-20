@@ -446,6 +446,7 @@ mod tests {
             ("subtree", true),
             ("root-tie", true),
             ("odd-star", true),
+            ("malformed-readers", true),
             ("quarantined", true),
         ] {
             db.create_repo(&repo(id, OWNER, id, public)).await.unwrap();
@@ -470,11 +471,20 @@ mod tests {
             ("root-tie", "/", vec![reader.to_owned()]),
             ("root-tie", "/**", vec![]),
             ("odd-star", "/*", vec![]),
+            ("malformed-readers", "/", vec![]),
         ] {
             db.set_visibility_rule(id, glob, VisibilityMode::B, &readers, OWNER)
                 .await
                 .unwrap();
         }
+        // The typed setter cannot create malformed JSON, but existing TEXT rows
+        // can contain it. Such a rule must deny this repo, not abort the page.
+        sqlx::query("UPDATE visibility_rules SET reader_dids = $1 WHERE repo_id = $2")
+            .bind("not JSON")
+            .bind("malformed-readers")
+            .execute(db.pool())
+            .await
+            .unwrap();
         let all = db.list_all_repos_deduped().await.unwrap();
         for caller in [
             None,
@@ -508,6 +518,22 @@ mod tests {
             assert_eq!(actual, expected, "caller {caller:?}");
         }
         let schema = schema(db);
+        for caller in [None, Some("did:key:zUnauthorized")] {
+            let query = "{ repos { name } }";
+            let response = match caller {
+                None => anon(&schema, query).await,
+                Some(caller) => authed(&schema, query, caller).await,
+            };
+            assert!(response.errors.is_empty(), "{:?}", response.errors);
+            let mut names: Vec<String> = response.data.into_json().unwrap()["repos"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|repo| repo["name"].as_str().unwrap().to_owned())
+                .collect();
+            names.sort();
+            assert_eq!(names, ["odd-star", "open", "subtree"]);
+        }
         let query = "{ reposPage(limit: 1) { nodes { name ownerDid } hasNextPage endCursor } }";
         let response = anon(&schema, query).await;
         assert!(response.errors.is_empty(), "{:?}", response.errors);

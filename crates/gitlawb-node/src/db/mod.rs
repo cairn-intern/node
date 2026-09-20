@@ -1547,6 +1547,7 @@ impl Db {
     /// name. Apply root visibility before LIMIT: private rows must not consume
     /// page slots or influence continuation metadata. The root-rule predicate
     /// mirrors `visibility::listable_at_root`; a differential test pins it.
+    /// Malformed reader JSON denies that repo to non-owners without failing the page.
     /// Cursors only select a position and never confer read authority.
     pub async fn list_visible_repos_page(
         &self,
@@ -1568,6 +1569,7 @@ impl Db {
              WHERE (
                  ($2::text IS NOT NULL AND ({key}) = $2)
                  OR CASE WHEN root_rule.reader_dids IS NULL THEN d.is_public
+                    WHEN NOT pg_input_is_valid(root_rule.reader_dids, 'jsonb') THEN FALSE
                     WHEN jsonb_typeof(root_rule.reader_dids::jsonb) = 'array' THEN
                         COALESCE(root_rule.reader_dids::jsonb ? $3::text, FALSE)
                         AND NOT EXISTS (

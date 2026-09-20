@@ -31,6 +31,8 @@ hidden and quarantined repositories do not occupy page slots or create a
 continuation signal. Cursors contain a position from the last returned visible
 repository, not a permission grant. Each request checks the current caller's
 visibility independently. Keep the same caller while traversing a list.
+Malformed reader lists in a repository's root visibility rule deny access to
+non-owners for that repository while other visible repositories remain listable.
 
 Pagination is not a snapshot: concurrent renames, ownership changes, or visibility
 changes can alter subsequent pages. Treat cursors as opaque and restart from the
