@@ -2,6 +2,7 @@ use async_graphql::{Context, Object, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use std::sync::Arc;
 
+use crate::api::events::MAX_VISIBLE_REF_UPDATES;
 use crate::db::{Db, RepoRecord, MAX_VISIBLE_REPO_PAGE_SIZE};
 
 use super::types::{AgentTaskType, RefUpdateType, RepoPageType, RepoType};
@@ -49,8 +50,9 @@ impl QueryRoot {
     // DB-backed roots carry a base cost so aliases consume the request budget
     // even when each alias selects only one inexpensive response field.
     #[graphql(complexity = "50 + child_complexity")]
-    /// Complete visible repository list, up to 200 entries. Larger lists must
-    /// use reposPage; this field returns an error instead of truncating silently.
+    /// Complete visible repository list, up to MAX_VISIBLE_REPO_PAGE_SIZE entries.
+    /// Larger lists must use reposPage; this field returns an error instead of
+    /// truncating silently.
     async fn repos(&self, ctx: &Context<'_>) -> Result<Vec<RepoType>> {
         let db = ctx.data_unchecked::<Arc<Db>>();
         let caller = ctx
@@ -62,9 +64,10 @@ impl QueryRoot {
             .await
             .map_err(crate::graphql::graphql_db_err)?;
         if repos.len() > MAX_VISIBLE_REPO_PAGE_SIZE {
-            return Err(async_graphql::Error::new(
-                "repository list exceeds 200 entries; use reposPage with limit and after",
-            ));
+            return Err(async_graphql::Error::new(format!(
+                "repository list exceeds {} entries; use reposPage with limit and after",
+                MAX_VISIBLE_REPO_PAGE_SIZE
+            )));
         }
         // Preserve the legacy activity ordering for complete, small lists.
         repos.sort_by_key(|repo| std::cmp::Reverse(repo.updated_at));
@@ -73,19 +76,24 @@ impl QueryRoot {
 
     /// Bounded visible repositories ordered by owner and name. Continue with
     /// endCursor while hasNextPage is true. Pages are not a database snapshot.
-    #[graphql(complexity = "50 + (limit.clamp(1, 200) as usize) + child_complexity")]
+    #[graphql(
+        complexity = "50 + (limit.clamp(1, MAX_VISIBLE_REPO_PAGE_SIZE as i64) as usize) + child_complexity"
+    )]
     async fn repos_page(
         &self,
         ctx: &Context<'_>,
         #[graphql(
             default = 50,
-            desc = "Page size from 1 to 200; other values are rejected."
+            desc = "Page size from 1 to MAX_VISIBLE_REPO_PAGE_SIZE; other values are rejected."
         )]
         limit: i64,
         after: Option<String>,
     ) -> Result<RepoPageType> {
         if !(1..=MAX_VISIBLE_REPO_PAGE_SIZE as i64).contains(&limit) {
-            return Err(async_graphql::Error::new("limit must be between 1 and 200"));
+            return Err(async_graphql::Error::new(format!(
+                "limit must be between 1 and {}",
+                MAX_VISIBLE_REPO_PAGE_SIZE
+            )));
         }
         let after = after.as_deref().map(parse_repo_cursor).transpose()?;
         let caller = ctx
@@ -113,7 +121,15 @@ impl QueryRoot {
         })
     }
 
-    #[graphql(complexity = "50 + (limit.clamp(0, 200) as usize) * child_complexity")]
+    // Complexity is additive with a base reflecting the collector's fixed scan:
+    // every request loads the full deduped repo set, the quarantined set, and
+    // the visibility rules, then walks up to max(limit, 2048) event rows past
+    // withheld ones, regardless of `limit`. A multiplicative price both
+    // undercharged limit:1 (51 for that fixed work) and made the documented
+    // max-200 request unreachable (limit:200 with two fields cost 450 > 400).
+    #[graphql(
+        complexity = "100 + (limit.clamp(0, MAX_VISIBLE_REF_UPDATES) as usize) + child_complexity"
+    )]
     async fn ref_updates(
         &self,
         ctx: &Context<'_>,
@@ -453,6 +469,8 @@ mod tests {
             ("root-tie", true),
             ("odd-star", true),
             ("malformed-readers", true),
+            ("non-array-readers", true),
+            ("non-string-reader", true),
             ("quarantined", true),
         ] {
             db.create_repo(&repo(id, OWNER, id, public)).await.unwrap();
@@ -478,6 +496,8 @@ mod tests {
             ("root-tie", "/**", vec![]),
             ("odd-star", "/*", vec![]),
             ("malformed-readers", "/", vec![]),
+            ("non-array-readers", "/", vec![]),
+            ("non-string-reader", "/", vec![]),
         ] {
             db.set_visibility_rule(id, glob, VisibilityMode::B, &readers, OWNER)
                 .await
@@ -485,9 +505,28 @@ mod tests {
         }
         // The typed setter cannot create malformed JSON, but existing TEXT rows
         // can contain it. Such a rule must deny this repo, not abort the page.
+        // All three deny arms of the reader_dids predicate are pinned here:
+        // (a) invalid JSON, (b) valid JSON that is not an array, (c) an array
+        // containing a non-string member. The Rust gate parses reader_dids as
+        // Vec<String> with unwrap_or_default(), so (b) and (c) also fail to
+        // parse and deny; the SQL CASE must agree on every shape.
         sqlx::query("UPDATE visibility_rules SET reader_dids = $1 WHERE repo_id = $2")
             .bind("not JSON")
             .bind("malformed-readers")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE visibility_rules SET reader_dids = $1 WHERE repo_id = $2")
+            .bind("\"just-a-string\"")
+            .bind("non-array-readers")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        // The named reader is listed, but the non-string member poisons the
+        // whole list: both sides must still deny them.
+        sqlx::query("UPDATE visibility_rules SET reader_dids = $1 WHERE repo_id = $2")
+            .bind("[\"did:key:zReader\", 42]")
+            .bind("non-string-reader")
             .execute(db.pool())
             .await
             .unwrap();
@@ -691,8 +730,12 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(response.errors.len(), 1);
+            let expected_limit_message = format!(
+                "limit must be between 1 and {}",
+                crate::db::MAX_VISIBLE_REPO_PAGE_SIZE
+            );
             assert!(
-                response.errors[0].message == "limit must be between 1 and 200"
+                response.errors[0].message == expected_limit_message
                     || response.errors[0].message == "invalid repository cursor"
             );
         }

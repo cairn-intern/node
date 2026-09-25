@@ -580,7 +580,7 @@ mod tests {
         let schema = build_schema(Arc::new(Db::for_testing(pool)), ref_tx, task_tx);
 
         // refUpdates(limit: 200):
-        // Single-field selection has child_complexity 1 -> cost 50 + 200 * 1 = 250 <= 400.
+        // Single-field selection has child_complexity 1 -> cost 100 + 200 + 1 = 301 <= 400.
         // It passes validation and reaches the resolver (which yields db error on lazy pool).
         let single_ref = schema.execute("{ refUpdates(limit: 200) { repo } }").await;
         assert!(
@@ -600,13 +600,29 @@ mod tests {
             single_ref.errors
         );
 
-        // Two-field selection has child_complexity 2 -> cost 50 + 200 * 2 = 450 > 400 (rejected before resolver).
+        // Two-field selection has child_complexity 2 -> cost 100 + 200 + 2 = 302 <= 400.
+        // The documented max-200 request stays reachable with multiple fields
+        // (the old multiplicative price rejected it at 450); it passes
+        // validation and reaches the resolver like the single-field case.
         let multi_ref = schema
             .execute("{ refUpdates(limit: 200) { repo refName } }")
             .await;
-        assert_eq!(multi_ref.data, async_graphql::Value::Null);
-        assert_eq!(multi_ref.errors.len(), 1);
-        assert_eq!(multi_ref.errors[0].message, "Query is too complex.");
+        assert!(
+            !multi_ref
+                .errors
+                .iter()
+                .any(|e| e.message == "Query is too complex."),
+            "two-field refUpdates at max limit 200 must pass complexity validation: {:?}",
+            multi_ref.errors
+        );
+        assert!(
+            multi_ref
+                .errors
+                .iter()
+                .any(|e| e.message == GRAPHQL_DB_ERROR_MESSAGE),
+            "two-field refUpdates at max limit 200 must reach the resolver: {:?}",
+            multi_ref.errors
+        );
 
         // tasks(limit: 200):
         // Single-field selection has child_complexity 1 -> cost 50 + 200 * 1 = 250 <= 400.

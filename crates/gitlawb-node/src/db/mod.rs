@@ -1549,6 +1549,20 @@ impl Db {
     /// mirrors `visibility::listable_at_root`; a differential test pins it.
     /// Malformed reader JSON denies that repo to non-owners without failing the page.
     /// Cursors only select a position and never confer read authority.
+    ///
+    /// Performance note: the page orders and keyset-filters on
+    /// `(owner_key, name)` under `COLLATE "C"`, but the existing
+    /// `idx_repos_owner_key_name` index is built on the database default
+    /// collation and cannot serve that ordering, so each page sorts the full
+    /// deduped repo set before the keyset filter applies: O(total repos) work
+    /// per page. This is accepted (pages are capped at
+    /// `MAX_VISIBLE_REPO_PAGE_SIZE` rows over a narrow projection). A
+    /// C-collation expression index was deliberately not added in a migration:
+    /// versions 27-35 are claimed by other in-flight branches (Gitlawb/node#384
+    /// claims 27-35, #464 claims 27-28) and the runner keys applied migrations
+    /// on the version integer alone, so a colliding entry would be silently
+    /// skipped on whichever side merges second. Revisit once that range lands
+    /// or clears.
     pub async fn list_visible_repos_page(
         &self,
         caller: Option<&str>,
