@@ -49,8 +49,11 @@ pub struct QueryRoot;
 impl QueryRoot {
     // DB-backed roots carry a base cost so aliases consume the request budget
     // even when each alias selects only one inexpensive response field.
-    #[graphql(complexity = "50 + child_complexity")]
-    /// Complete visible repository list, up to MAX_VISIBLE_REPO_PAGE_SIZE entries.
+    // `repos` performs the same full corpus scan as a max-size `reposPage`
+    // (list_visible_repos_page with MAX_VISIBLE_REPO_PAGE_SIZE + 1), so it
+    // is priced as the full page it is, not as a cheap alias.
+    #[graphql(complexity = "50 + MAX_VISIBLE_REPO_PAGE_SIZE + child_complexity")]
+    /// Complete visible repository list, up to 200 entries.
     /// Larger lists must use reposPage; this field returns an error instead of
     /// truncating silently.
     async fn repos(&self, ctx: &Context<'_>) -> Result<Vec<RepoType>> {
@@ -84,7 +87,7 @@ impl QueryRoot {
         ctx: &Context<'_>,
         #[graphql(
             default = 50,
-            desc = "Page size from 1 to MAX_VISIBLE_REPO_PAGE_SIZE; other values are rejected."
+            desc = "Page size from 1 to 200; other values are rejected."
         )]
         limit: i64,
         after: Option<String>,
@@ -190,7 +193,12 @@ impl QueryRoot {
         Ok(resolved)
     }
 
-    #[graphql(complexity = "50 + (limit.clamp(0, 200) as usize) * child_complexity")]
+    // Complexity is additive: list_tasks is a single LIMIT-bounded query whose
+    // cost does not scale with the selected fields, so the price is the base
+    // plus the clamped limit plus the child fields. A multiplicative price
+    // made the documented max-200 request unreachable (limit:200 with two
+    // fields cost 450 > 400).
+    #[graphql(complexity = "50 + (limit.clamp(0, 200) as usize) + child_complexity")]
     async fn tasks(
         &self,
         ctx: &Context<'_>,
@@ -510,26 +518,29 @@ mod tests {
         // containing a non-string member. The Rust gate parses reader_dids as
         // Vec<String> with unwrap_or_default(), so (b) and (c) also fail to
         // parse and deny; the SQL CASE must agree on every shape.
-        sqlx::query("UPDATE visibility_rules SET reader_dids = $1 WHERE repo_id = $2")
+        let rows = sqlx::query("UPDATE visibility_rules SET reader_dids = $1 WHERE repo_id = $2")
             .bind("not JSON")
             .bind("malformed-readers")
             .execute(db.pool())
             .await
             .unwrap();
-        sqlx::query("UPDATE visibility_rules SET reader_dids = $1 WHERE repo_id = $2")
+        assert_eq!(rows.rows_affected(), 1);
+        let rows = sqlx::query("UPDATE visibility_rules SET reader_dids = $1 WHERE repo_id = $2")
             .bind("\"just-a-string\"")
             .bind("non-array-readers")
             .execute(db.pool())
             .await
             .unwrap();
+        assert_eq!(rows.rows_affected(), 1);
         // The named reader is listed, but the non-string member poisons the
         // whole list: both sides must still deny them.
-        sqlx::query("UPDATE visibility_rules SET reader_dids = $1 WHERE repo_id = $2")
+        let rows = sqlx::query("UPDATE visibility_rules SET reader_dids = $1 WHERE repo_id = $2")
             .bind("[\"did:key:zReader\", 42]")
             .bind("non-string-reader")
             .execute(db.pool())
             .await
             .unwrap();
+        assert_eq!(rows.rows_affected(), 1);
         let all = db.list_all_repos_deduped().await.unwrap();
         for caller in [
             None,

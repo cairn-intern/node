@@ -107,6 +107,8 @@ pub fn build_schema(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::events::MAX_VISIBLE_REF_UPDATES;
+    use crate::db::MAX_VISIBLE_REPO_PAGE_SIZE;
     use async_graphql::{EmptyMutation, EmptySubscription, Object, Value};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -380,16 +382,18 @@ mod tests {
     #[tokio::test]
     async fn production_limits_reject_mutation_aliases_and_large_lists() {
         let schema = production_test_schema();
+        // Limits are derived from the MAX_* constants so the boundaries move
+        // with the documented maximums instead of going stale as literals.
         for (prefix, count, field) in [
-            ("mutation", 8, "claimTask(id: \"missing\", assigneeDid: \"did:key:test\") { id }"),
-            ("mutation", 8, "createTask(delegatorDid: \"did:key:test\", input: { kind: \"test\", capability: \"test\" }) { id }"),
-            ("mutation", 8, "completeTask(id: \"missing\", byDid: \"did:key:test\", input: {}) { id }"),
-            ("mutation", 8, "failTask(id: \"missing\", byDid: \"did:key:test\", input: {}) { id }"),
-            ("query", 8, "task(id: \"missing\") { id }"),
-            ("query", 2, "refUpdates(limit: 200) { repo }"),
-            ("query", 2, "tasks(limit: 200) { id }"),
-            ("query", 2, "reposPage(limit: 200) { nodes { name } }"),
-            ("query", 8, "reposPage(limit: 1) { nodes { name } }"),
+            ("mutation", 8, "claimTask(id: \"missing\", assigneeDid: \"did:key:test\") { id }".to_owned()),
+            ("mutation", 8, "createTask(delegatorDid: \"did:key:test\", input: { kind: \"test\", capability: \"test\" }) { id }".to_owned()),
+            ("mutation", 8, "completeTask(id: \"missing\", byDid: \"did:key:test\", input: {}) { id }".to_owned()),
+            ("mutation", 8, "failTask(id: \"missing\", byDid: \"did:key:test\", input: {}) { id }".to_owned()),
+            ("query", 8, "task(id: \"missing\") { id }".to_owned()),
+            ("query", 2, format!("refUpdates(limit: {MAX_VISIBLE_REF_UPDATES}) {{ repo }}")),
+            ("query", 2, "tasks(limit: 200) { id }".to_owned()),
+            ("query", 2, format!("reposPage(limit: {MAX_VISIBLE_REPO_PAGE_SIZE}) {{ nodes {{ name }} }}")),
+            ("query", 8, "reposPage(limit: 1) { nodes { name } }".to_owned()),
         ] {
             let fields = (0..count)
                 .map(|n| format!("r{n}: {field}"))
@@ -411,7 +415,9 @@ mod tests {
             "nodes { name ownerDid } hasNextPage endCursor",
         ] {
             let response = schema
-                .execute(format!("{{ reposPage(limit: 200) {{ {selection} }} }}"))
+                .execute(format!(
+                    "{{ reposPage(limit: {MAX_VISIBLE_REPO_PAGE_SIZE}) {{ {selection} }} }}"
+                ))
                 .await;
             assert!(response.errors.is_empty(), "{:?}", response.errors);
             assert_eq!(
@@ -579,16 +585,20 @@ mod tests {
         let (task_tx, _) = tokio::sync::broadcast::channel(16);
         let schema = build_schema(Arc::new(Db::for_testing(pool)), ref_tx, task_tx);
 
-        // refUpdates(limit: 200):
+        // refUpdates(limit: MAX_VISIBLE_REF_UPDATES):
         // Single-field selection has child_complexity 1 -> cost 100 + 200 + 1 = 301 <= 400.
         // It passes validation and reaches the resolver (which yields db error on lazy pool).
-        let single_ref = schema.execute("{ refUpdates(limit: 200) { repo } }").await;
+        let single_ref = schema
+            .execute(format!(
+                "{{ refUpdates(limit: {MAX_VISIBLE_REF_UPDATES}) {{ repo }} }}"
+            ))
+            .await;
         assert!(
             !single_ref
                 .errors
                 .iter()
                 .any(|e| e.message == "Query is too complex."),
-            "single-field refUpdates at max limit 200 must pass complexity validation: {:?}",
+            "single-field refUpdates at max limit must pass complexity validation: {:?}",
             single_ref.errors
         );
         assert!(
@@ -596,7 +606,7 @@ mod tests {
                 .errors
                 .iter()
                 .any(|e| e.message == GRAPHQL_DB_ERROR_MESSAGE),
-            "single-field refUpdates at max limit 200 must reach the resolver: {:?}",
+            "single-field refUpdates at max limit must reach the resolver: {:?}",
             single_ref.errors
         );
 
@@ -605,14 +615,16 @@ mod tests {
         // (the old multiplicative price rejected it at 450); it passes
         // validation and reaches the resolver like the single-field case.
         let multi_ref = schema
-            .execute("{ refUpdates(limit: 200) { repo refName } }")
+            .execute(format!(
+                "{{ refUpdates(limit: {MAX_VISIBLE_REF_UPDATES}) {{ repo refName }} }}"
+            ))
             .await;
         assert!(
             !multi_ref
                 .errors
                 .iter()
                 .any(|e| e.message == "Query is too complex."),
-            "two-field refUpdates at max limit 200 must pass complexity validation: {:?}",
+            "two-field refUpdates at max limit must pass complexity validation: {:?}",
             multi_ref.errors
         );
         assert!(
@@ -620,7 +632,7 @@ mod tests {
                 .errors
                 .iter()
                 .any(|e| e.message == GRAPHQL_DB_ERROR_MESSAGE),
-            "two-field refUpdates at max limit 200 must reach the resolver: {:?}",
+            "two-field refUpdates at max limit must reach the resolver: {:?}",
             multi_ref.errors
         );
 
@@ -645,11 +657,45 @@ mod tests {
             single_task.errors
         );
 
-        // Two-field selection has child_complexity 2 -> cost 50 + 200 * 2 = 450 > 400 (rejected before resolver).
+        // Two-field selection has child_complexity 2 -> cost 50 + 200 + 2 = 252 <= 400.
+        // The documented max-200 request stays reachable with multiple fields
+        // (the old multiplicative price rejected it at 450); it passes
+        // validation and reaches the resolver like the single-field case.
         let multi_task = schema.execute("{ tasks(limit: 200) { id status } }").await;
-        assert_eq!(multi_task.data, async_graphql::Value::Null);
-        assert_eq!(multi_task.errors.len(), 1);
-        assert_eq!(multi_task.errors[0].message, "Query is too complex.");
+        assert!(
+            !multi_task
+                .errors
+                .iter()
+                .any(|e| e.message == "Query is too complex."),
+            "two-field tasks at max limit 200 must pass complexity validation: {:?}",
+            multi_task.errors
+        );
+        assert!(
+            multi_task
+                .errors
+                .iter()
+                .any(|e| e.message == GRAPHQL_DB_ERROR_MESSAGE),
+            "two-field tasks at max limit 200 must reach the resolver: {:?}",
+            multi_task.errors
+        );
+    }
+
+    #[tokio::test]
+    async fn ref_updates_fixed_base_is_charged() {
+        // The 100 base in the refUpdates complexity formula charges for the
+        // collector's fixed work (loading the deduped repo set, the
+        // quarantined set, and the visibility rules, then walking up to 16
+        // keyset pages) even at limit: 1. Four aliases at limit: 1 cost
+        // 4 * (100 + 1 + 1) = 408 > 400 and must be rejected. If the base
+        // disappears, the cost drops to 4 * (1 + 1) = 8 and this test fails.
+        let schema = production_test_schema();
+        let fields = (0..4)
+            .map(|n| format!("r{n}: refUpdates(limit: 1) {{ repo }}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let response = schema.execute(format!("{{ {fields} }}")).await;
+        assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+        assert_eq!(response.errors[0].message, "Query is too complex.");
     }
 
     #[derive(Clone, Copy)]
