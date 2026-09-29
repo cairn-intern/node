@@ -217,6 +217,30 @@ pub struct InfoRefsQuery {
 
 // ── Handlers ──────────────────────────────────────────────────────────────
 
+/// Validate a repository name at the create/fork write paths. The charset is
+/// restricted, and the length is bounded so every cursor the server emits
+/// parses back: `repo_cursor` embeds the name in a base64(JSON) cursor that
+/// `parse_repo_cursor` rejects over 4096 bytes (#465 4th round).
+fn validate_repo_name(name: &str) -> Result<()> {
+    // Sanitize name: alphanumeric, hyphens, underscores only
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::BadRequest(
+            "repo name must contain only alphanumeric characters, hyphens, and underscores".into(),
+        ));
+    }
+    // Byte length, not char count: the cursor budget is measured in bytes.
+    if name.len() > crate::db::MAX_REPO_NAME_LEN {
+        return Err(AppError::BadRequest(format!(
+            "repo name must be at most {} bytes",
+            crate::db::MAX_REPO_NAME_LEN
+        )));
+    }
+    Ok(())
+}
+
 /// POST /api/v1/repos
 /// Create a new repository. Requires HTTP Signature auth.
 pub async fn create_repo(
@@ -231,16 +255,7 @@ pub async fn create_repo(
     // rejected request (bad name, already exists) never burns a valid proof.
     let proof = crate::icaptcha::verify_request(&headers, &auth.0)?;
 
-    // Sanitize name: alphanumeric, hyphens, underscores only
-    if !req
-        .name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(AppError::BadRequest(
-            "repo name must contain only alphanumeric characters, hyphens, and underscores".into(),
-        ));
-    }
+    validate_repo_name(&req.name)?;
 
     // Owner is the authenticated agent's DID
     let owner_did = auth.0;
@@ -3036,15 +3051,7 @@ pub async fn fork_repo(
     let fork_name = req.name.unwrap_or_else(|| source.name.clone());
     let forker_did = auth.0;
 
-    // Validate fork name
-    if !fork_name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(AppError::BadRequest(
-            "repo name must contain only alphanumeric characters, hyphens, and underscores".into(),
-        ));
-    }
+    validate_repo_name(&fork_name)?;
 
     // Check no name conflict under the forker's ownership
     let forker_short = crate::db::normalize_owner_key(&forker_did);
@@ -3342,6 +3349,23 @@ mod tests {
     const OWNER_DID: &str = "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH";
     const OWNER_SHORT: &str = "z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH";
     const STRANGER_DID: &str = "did:key:z6Mkffonly5tranger0000000000000000000000000000000";
+
+    #[test]
+    fn repo_name_validation_rejects_bad_charset_and_overlong_names() {
+        assert!(validate_repo_name("ok-name_123").is_ok());
+        assert!(validate_repo_name(&"a".repeat(crate::db::MAX_REPO_NAME_LEN)).is_ok());
+        // The bound is in bytes: the cursor budget is measured in bytes.
+        let overlong = "a".repeat(crate::db::MAX_REPO_NAME_LEN + 1);
+        let err = validate_repo_name(&overlong).unwrap_err();
+        assert!(
+            matches!(err, AppError::BadRequest(_)),
+            "overlong name must be a 400, got: {err:?}"
+        );
+        assert!(validate_repo_name("bad name!").is_err());
+        // Empty names were already admissible before the length bound; the
+        // bound does not change that.
+        assert!(validate_repo_name("").is_ok());
+    }
 
     #[test]
     fn upload_pack_request_finalizes_only_with_done_pktline() {
